@@ -18,6 +18,10 @@ module Lib2
     parseView,
     parseAddInt,
     parseString,
+    parseLiteral,
+    strip,
+    or3',
+    many,
   ) where
 
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
@@ -99,6 +103,16 @@ or2' p1 p2 input =
 or3' :: Parser a -> Parser a -> Parser a -> Parser a
 or3' p1 p2 p3 input =
   case p1 input of
+    Right result -> Right result
+    Left e1 -> case p2 input of
+      Right result -> Right result
+      Left e2 -> case p3 input of
+        Right result -> Right result
+        Left e3 -> Left $ e1 ++ "; " ++ e2 ++ "; " ++ e3
+
+or3 :: Parser a -> Parser a -> Parser a -> Parser a
+or3 p1 p2 p3 input =
+  case p1 input of
     Right (v1, r1) -> Right (v1, r1)
     Left _ -> case p2 input of
       Right (v2, r2) -> Right (v2, r2)
@@ -119,6 +133,27 @@ or5' p1 p2 p3 p4 p5 input =
 skipSpaces :: String -> String
 skipSpaces = dropWhile (== ' ')
 
+strip :: String -> String
+strip = lstrip . rstrip
+
+lstrip :: String -> String
+lstrip s = case s of
+  [] -> []
+  (x : xs) ->
+    if x `elem` " \t\r\n"
+      then lstrip xs
+      else s
+
+rstrip :: String -> String
+rstrip = reverse . lstrip . reverse
+
+many :: Parser a -> Parser [a]
+many p = many' p []
+  where
+    many' p' acc input =
+      case p' input of
+        Left _ -> if null acc then Left "No matches found" else Right (acc, input)
+        Right (v, r) -> many' p' (acc ++ [v]) r
 
 
 parseLiteral :: String -> Parser String
@@ -363,10 +398,10 @@ parseSellItem input =
 parseRemove :: Parser Query
 parseRemove input =
   and2' (\_ itemName -> RemoveItem itemName) (parseLiteral "remove_item") parseString input
-parseQuery :: String -> Either String Query
+parseQuery :: String -> Either String (Query, String)
 parseQuery input =
   case or5' parseView  parseAddStorage parseSellItem parseRestock parseRemove input of
-    Right (query, _) -> Right query
+    Right (query, rest) -> Right (query, rest)
     Left _ -> Left "Failed to parse: Unknown command given"
 
 stateTransition :: State -> Query -> Either String (Maybe String, State)
