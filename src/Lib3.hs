@@ -2,6 +2,7 @@
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 {-# HLINT ignore "Avoid lambda using infix" #-}
 {-# HLINT ignore "Avoid lambda" #-}
+{-# HLINT ignore "Use concatMap" #-}
 module Lib3
     ( stateTransition,
     StorageOp (..),
@@ -42,21 +43,93 @@ storageOpLoop chan = do
       writeChan replyChan content
   storageOpLoop chan
 
--- Simplified to just handle single commands
-data Command = StatementCommand Query |
+data Statements = Batch [Lib2.Query] |
+               Single Lib2.Query
+               deriving (Show, Eq)
+
+data Command = StatementCommand Statements |
                LoadCommand |
                SaveCommand
                deriving (Show, Eq)
 
--- Modified to convert an ItemWithId into a storage command string
-itemToStorageCommand :: ItemWithId -> String
-itemToStorageCommand (ItemWithId _ item) = case item of
-    Food cat name qty -> 
-        "add_storage " ++ show cat ++ " " ++ name ++ " " ++ show qty
-    Beverage name qty -> 
-        "add_storage Beverage " ++ name ++ " " ++ show qty
-    HouseholdSupplies cat name qty -> 
-        "add_storage " ++ show cat ++ " " ++ name ++ " " ++ show qty
+
+-- | Parses user's input.
+parseCommand :: String -> Either String (Command, String)
+parseCommand =
+  Lib2.or3'
+    parseLoad
+    parseSave
+    parseStatementsCommand
+
+parseLoad :: String -> Either String (Command, String)
+parseLoad input =
+  let strippedInput = Lib2.strip input
+  in case Lib2.parseLiteral "load" strippedInput of
+       Right (_, rest) -> Right (LoadCommand, rest)
+       Left _ -> Left "Failed to parse 'load'"
+
+parseSave :: String -> Either String (Command, String)
+parseSave input =
+  case Lib2.parseLiteral "save" (Lib2.strip input) of
+    Right (_, rest) -> Right (SaveCommand, rest)
+    Left _ -> Left ""
+
+-- | Parses Statement.
+-- Must be used in parseCommand.
+-- Reuse Lib2 as much as you can.
+-- You can change Lib2.parseQuery signature if needed.
+-- | Parses Statements.
+-- Handles both single and batch commands.
+-- | Parses Statements.
+-- Handles both single and batch commands.
+-- | Parses Statements.
+-- Handles both single and batch commands.
+parseStatements :: String -> Either String (Statements, String)
+parseStatements input =
+  let
+    strippedInput = strip input
+  in case parseMultipleQueries strippedInput of
+       Right (queries, rest) -> Right (Batch queries, rest)
+       Left err -> Left err
+
+parseStatementsCommand :: String -> Either String (Command, String)
+parseStatementsCommand input =
+  case parseStatements input of
+    Right (statements, rest) -> Right (StatementCommand statements, rest)
+    Left err -> Left $ "Failed to parse command\n" ++ err
+
+
+parseMultipleQueries :: String -> Either String ([Query], String)
+parseMultipleQueries input =
+  parseQueries input []
+  where
+    parseQueries :: String -> [Query] -> Either String ([Query], String)
+    parseQueries "" acc = Right (reverse acc, "")
+    parseQueries str acc =
+      let strippedStr = strip str
+      in case parseQuery strippedStr of
+           Right (query, rest) -> parseQueries (strip rest) (query : acc)
+           Left err | null acc   -> Left err
+                    | otherwise -> Right (reverse acc, str)
+
+
+-- | Converts program's state into Statements
+-- (probably a batch, but might be a single query)
+marshallState :: Lib2.State -> [Query]
+marshallState state =
+    map (AddStorage . Storage . (:[]) . item) (inventory state)
+
+-- Modified to render each command on a new line
+-- | Renders Statements into a String which
+-- can be parsed back into Statements by parseStatements
+-- function. The String returned by this function must be used
+-- as persist program's state in a file. 
+-- Must have a property test
+-- for all s: parseStatements (renderStatements s) == Right(s, "")
+renderStatements :: [Query] -> String
+renderStatements queries = 
+    concat $ map renderQuery queries
+
 
 -- Helper function to render individual queries
 renderQuery :: Query -> String
@@ -76,77 +149,7 @@ renderItem :: Item -> String
 renderItem (Food cat name qty) = show cat ++ " " ++ name ++ " " ++ show qty
 renderItem (Beverage name qty) = "Beverage " ++ name ++ " " ++ show qty
 renderItem (HouseholdSupplies cat name qty) = show cat ++ " " ++ name ++ " " ++ show qty
-parseLoad :: String -> Either String (Command, String)
-parseLoad input =
-  let strippedInput = Lib2.strip input
-  in case Lib2.parseLiteral "load" strippedInput of
-       Right (_, rest) -> Right (LoadCommand, rest)
-       Left _ -> Left "Failed to parse 'load'"
 
-parseSave :: String -> Either String (Command, String)
-parseSave input =
-  case Lib2.parseLiteral "save" (Lib2.strip input) of
-    Right (_, rest) -> Right (SaveCommand, rest)
-    Left _ -> Left ""
-
--- | Parses user's input.
-parseCommand :: String -> Either String (Command, String)
-parseCommand input = 
-    case Lib2.or3' parseStatementCommand parseLoad parseSave input of
-        Right result -> Right result
-        Left err -> Left $ "Failed to parse command: " ++ err
-    where
-        parseStatementCommand input = 
-            case lines input of
-                [line] -> case parseQuery line of
-                    Right (query, rest) -> Right (StatementCommand query, rest)
-                    Left err -> Left err
-                _ -> case parseStatements input of
-                    Right (queries, rest) -> Right (StatementCommand (head queries), rest)
-                    Left err -> Left err
-
--- | Parses Statement.
--- Must be used in parseCommand.
--- Reuse Lib2 as much as you can.
--- You can change Lib2.parseQuery signature if needed.
-parseStatements :: String -> Either String ([Query], String)
-parseStatements input = do
-    let lines' = filter (not . null) $ lines input
-    queries <- parseLines lines'
-    return (queries, "")
-  where
-    parseLines :: [String] -> Either String [Query]
-    parseLines [] = Right []
-    parseLines (line:rest) = do
-        (query, remaining) <- parseQuery line
-        if null (Lib2.strip remaining)
-            then do
-                rest_queries <- parseLines rest
-                return (query : rest_queries)
-            else Left $ "Unexpected content after query: " ++ remaining
-
--- You might also need to ensure strip is available:
-strip :: String -> String
-strip = Lib2.strip
-
--- Modified to convert state into a list of commands
-
--- | Converts program's state into Statements
--- (probably a batch, but might be a single query)
-marshallState :: Lib2.State -> [Query]
-marshallState state =
-    map (AddStorage . Storage . (:[]) . item) (inventory state)
-
--- Modified to render each command on a new line
--- | Renders Statements into a String which
--- can be parsed back into Statements by parseStatements
--- function. The String returned by this function must be used
--- as persist program's state in a file. 
--- Must have a property test
--- for all s: parseStatements (renderStatements s) == Right(s, "")
-renderStatements :: [Query] -> String
-renderStatements queries = 
-    concat $ map renderQuery queries
 
 -- | Updates a state according to a command.
 -- Performs file IO via ioChan if needed.
@@ -171,7 +174,7 @@ stateTransition st command ioChan = case command of
     case parseStatements content of
       Left err -> return $ Left err
       Right (queries, _) -> atomically $ do
-        let (_, newState) = applyQueries Lib2.emptyState queries
+        let (_, newState) = applyQueries Lib2.emptyState (getQueries queries)
         writeTVar st newState
         return $ Right $ Just "State loaded successfully."
   SaveCommand -> do
@@ -180,11 +183,11 @@ stateTransition st command ioChan = case command of
     return $ case result of
       Left err -> Left err
       Right () -> Right $ Just "State saved successfully."
-  StatementCommand query -> atomically $ do
+  StatementCommand statements -> atomically $ do
     currentState <- readTVar st
-    let (msg, newState) = applyQuery currentState query
+    let (msg, newState) = applyQueries currentState (getQueries statements)
     writeTVar st newState
-    return $ Right $ Just ("Command parsed\nLog:\n" ++ msg)
+    return $ Right $ Just ("Commands parsed\nLog:\n" ++ msg)
 
 saveStateToFile :: Lib2.State -> Chan StorageOp -> IO (Either String ())
 saveStateToFile state ioChan = do
@@ -193,6 +196,10 @@ saveStateToFile state ioChan = do
   writeChan ioChan (Save serializedState replyChan)
   result <- readChan replyChan
   return $ Right result
+
+getQueries :: Statements -> [Lib2.Query]
+getQueries (Single query) = [query]
+getQueries (Batch queries) = queries
 
 applyQueries :: Lib2.State -> [Lib2.Query] -> (String, Lib2.State)
 applyQueries st [] = ("", st)

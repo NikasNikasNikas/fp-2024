@@ -103,16 +103,6 @@ or2' p1 p2 input =
 or3' :: Parser a -> Parser a -> Parser a -> Parser a
 or3' p1 p2 p3 input =
   case p1 input of
-    Right result -> Right result
-    Left e1 -> case p2 input of
-      Right result -> Right result
-      Left e2 -> case p3 input of
-        Right result -> Right result
-        Left e3 -> Left $ e1 ++ "; " ++ e2 ++ "; " ++ e3
-
-or3 :: Parser a -> Parser a -> Parser a -> Parser a
-or3 p1 p2 p3 input =
-  case p1 input of
     Right (v1, r1) -> Right (v1, r1)
     Left _ -> case p2 input of
       Right (v2, r2) -> Right (v2, r2)
