@@ -21,7 +21,6 @@ module Lib2
     parseLiteral,
     strip,
     or3',
-    many,
   ) where
 
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
@@ -136,15 +135,6 @@ lstrip s = case s of
 
 rstrip :: String -> String
 rstrip = reverse . lstrip . reverse
-
-many :: Parser a -> Parser [a]
-many p = many' p []
-  where
-    many' p' acc input =
-      case p' input of
-        Left _ -> if null acc then Left "No matches found" else Right (acc, input)
-        Right (v, r) -> many' p' (acc ++ [v]) r
-
 
 parseLiteral :: String -> Parser String
 parseLiteral [] input = Right ([], input)

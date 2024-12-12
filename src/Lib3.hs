@@ -72,7 +72,7 @@ parseSave :: String -> Either String (Command, String)
 parseSave input =
   case Lib2.parseLiteral "save" (Lib2.strip input) of
     Right (_, rest) -> Right (SaveCommand, rest)
-    Left _ -> Left ""
+    Left _ -> Left "Failed to parse 'save'"
 
 -- | Parses Statement.
 -- Must be used in parseCommand.
@@ -81,9 +81,6 @@ parseSave input =
 -- | Parses Statements.
 -- Handles both single and batch commands.
 -- | Parses Statements.
--- Handles both single and batch commands.
--- | Parses Statements.
--- Handles both single and batch commands.
 parseStatements :: String -> Either String (Statements, String)
 parseStatements input =
   let
