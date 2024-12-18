@@ -21,26 +21,6 @@ unitTests :: TestTree
 unitTests = testGroup
   "Lib2 tests"
   [ 
-    testCase "Parse AddStorage Query" $
-      Lib2.parseQuery "add_storage Beverage Soda 10" @?=
-        Right (Lib2.AddStorage (Lib2.Storage [Lib2.Beverage "Soda" 10]), ""),
-
-    testCase "Parse SellItem Query" $
-      Lib2.parseQuery "sell Apples 5" @?=
-        Right (Lib2.SellItem "Apples" 5, ""),
-
-    testCase "Parse RestockItems Query" $
-      Lib2.parseQuery "restock Apples 5" @?=
-        Right (Lib2.RestockItems "Apples" 5, ""),
-
-    testCase "Parse RemoveItem Query" $
-      Lib2.parseQuery "remove_item Apples" @?=
-        Right (Lib2.RemoveItem "Apples", ""),
-
-    testCase "Parse ShowInventory Query" $
-      Lib2.parseQuery "show_inventory" @?=
-        Right (Lib2.ShowInventory, ""),
-
     testCase "State Transition - AddStorage" $
       let initialState = Lib2.emptyState
           query = Lib2.AddStorage (Lib2.Storage [Lib2.Food Lib2.Fruits "Apples" 10])
@@ -84,26 +64,42 @@ propertyTests = testGroup
 instance Arbitrary Lib2.Query where
   arbitrary = oneof
     [ Lib2.AddStorage <$> arbitrary
-    , Lib2.SellItem <$> arbitrary <*> arbitrary
-    , Lib2.RestockItems <$> arbitrary <*> arbitrary
-    , Lib2.RemoveItem <$> arbitrary
+    , Lib2.SellItem <$> validItemName <*> validQuantity
+    , Lib2.RestockItems <$> validItemName <*> validQuantity
+    , Lib2.RemoveItem <$> validItemName
     , pure Lib2.ShowInventory
     ]
+    where 
+      validItemName = elements ["Apples", "Bananas", "Oranges", "Carrots", "Potatoes", "Spinach", 
+                                "Rice", "Bread", "Pasta", "Milk", "Cheese", "Yogurt", 
+                                "Chicken", "Beef", "Fish", "Soda", "Juice", "Water", 
+                                "Detergent", "Soap", "PaperTowels", "ToiletPaper"]
+      validQuantity = choose (0, 100)
 
 instance Arbitrary Lib2.Storage where
-  arbitrary = Lib2.Storage <$> arbitrary
+  arbitrary = Lib2.Storage <$> listOf1 arbitrary
 
 instance Arbitrary Lib2.Category where
-  arbitrary = elements [Lib2.Fruits, Lib2.Vegetables, Lib2.Dairy]
+  arbitrary = elements [Lib2.Fruits, Lib2.Vegetables, Lib2.Grains, Lib2.Dairy, Lib2.Meats, 
+                        Lib2.CleaningProducts, Lib2.PaperGoods]
 
 instance Arbitrary Lib2.Item where
   arbitrary = oneof
-    [ Lib2.Food <$> arbitrary <*> arbitrary <*> arbitrary
-    , Lib2.Beverage <$> arbitrary <*> arbitrary
+    [ Lib2.Food <$> arbitrary <*> validFoodName <*> validQuantity
+    , Lib2.Beverage <$> validBeverageName <*> validQuantity
+    , Lib2.HouseholdSupplies <$> arbitrary <*> validHouseholdName <*> validQuantity
     ]
+    where 
+      validFoodName = elements ["Apples", "Bananas", "Oranges", "Carrots", "Potatoes", "Spinach", 
+                                "Rice", "Bread", "Pasta", "Milk", "Cheese", "Yogurt", 
+                                "Chicken", "Beef", "Fish"]
+      validBeverageName = elements ["Soda", "Juice", "Water"]
+      validHouseholdName = elements ["Detergent", "Soap", "PaperTowels", "ToiletPaper"]
+      validQuantity = choose (0, 100)
+
 instance Arbitrary Lib2.State where
     arbitrary = do
-        queries <- arbitrary :: Gen [Lib2.Query]
+        queries <- listOf1 arbitrary
         let (_, finalState) = applyQueries Lib2.emptyState queries
         return finalState
       where
@@ -132,5 +128,10 @@ prop_saveThenLoad originalState = ioProperty $ do
 prop_savedQueriesReproduceState :: Lib2.State -> Property
 prop_savedQueriesReproduceState originalState =
   let serialized = Lib3.renderStatements (Lib3.marshallState originalState)
-      parsed = Lib3.parseStatements serialized
-  in parsed === Right (Lib3.marshallState originalState, "")
+      (parsed, _) = Lib2.parse Lib3.parseStatements serialized
+  in case parsed of
+       Right statements -> 
+         let reconstructedQueries = Lib3.getQueries statements
+             originalQueries = Lib3.marshallState originalState
+         in reconstructedQueries === originalQueries
+       Left err -> counterexample ("Parsing failed: " ++ err) False

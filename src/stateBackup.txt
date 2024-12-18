@@ -1,4 +1,0 @@
-add_storage Fruits Apples 11
-add_storage Grains Rice 54
-add_storage CleaningProducts PaperTowels 9
-add_storage Grains Pasta 69

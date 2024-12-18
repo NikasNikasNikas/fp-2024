@@ -1,4 +1,0 @@
-add_storage CleaningProducts Soap 1
-add_storage Grains Rice 15
-add_storage Fruits Apples 0
-add_storage Fruits Bananas 11

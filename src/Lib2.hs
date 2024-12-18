@@ -1,4 +1,5 @@
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
+{-# LANGUAGE BlockArguments #-}
 module Lib2
   ( Query(..),
     State(..),
@@ -21,12 +22,22 @@ module Lib2
     parseLiteral,
     strip,
     or3',
+    Parser,
+    parse,
+    many,
+    ItemWithId,
+    showInventory,
   ) where
 
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 {-# HLINT ignore "Eta reduce" #-}
 {-# HLINT ignore "Avoid lambda" #-}
 import Data.Char (isDigit)
+import qualified Control.Monad.Trans.State as S
+import Control.Monad.Trans.Except (ExceptT, runExceptT, catchE, throwE)
+import Control.Monad.Trans.Class
+import Control.Applicative hiding (many)
+import qualified Parsers
 
 -- | Data types for Queries and State
 data Query
@@ -70,57 +81,59 @@ emptyState :: State
 emptyState = State {inventory = [], nextId = 1}
 
 -- | Basic parsers
-type Parser a = String -> Either String (a, String)
+type Parser a = ExceptT String (S.State String) a
 
-and2' :: (a -> b -> c) -> Parser a -> Parser b -> Parser c
-and2' f p1 p2 input =
-  case p1 input of
-    Right (v1, r1) ->
-      case p2 r1 of
-        Right (v2, r2) -> Right (f v1 v2, r2)
-        Left e2 -> Left e2
-    Left e1 -> Left e1
-
-and3' :: (a -> b -> c -> d) -> Parser a -> Parser b -> Parser c -> Parser d
-and3' f p1 p2 p3 input =
-    case p1 input of
-        Right (v1, rest1) ->
-            case p2 rest1 of
-                Right (v2, rest2) ->
-                    case p3 rest2 of
-                        Right (v3, rest3) -> Right (f v1 v2 v3, rest3)
-                        Left err -> Left err
-                Left err -> Left err
-        Left err -> Left err
-
-or2' :: Parser a -> Parser a -> Parser a
-or2' p1 p2 input =
-  case p1 input of
-    Right (v1, r1) -> Right (v1, r1)
-    Left _ -> p2 input
-
-or3' :: Parser a -> Parser a -> Parser a -> Parser a
-or3' p1 p2 p3 input =
-  case p1 input of
-    Right (v1, r1) -> Right (v1, r1)
-    Left _ -> case p2 input of
-      Right (v2, r2) -> Right (v2, r2)
-      Left _ -> p3 input
-
-or5' :: Parser a -> Parser a -> Parser a -> Parser a -> Parser a -> Parser a
-or5' p1 p2 p3 p4 p5 input =
-  case p1 input of
-    Right (v1, r1) -> Right (v1, r1)
-    Left _ -> case p2 input of
-      Right (v2, r2) -> Right (v2, r2)
-      Left _ -> case p3 input of
-        Right (v3, r3) -> Right (v3, r3)
-        Left _ -> case p4 input of
-          Right (v4, r4) -> Right (v4, r4)
-          Left _ -> p5 input
+parse :: Parser a -> String -> (Either String a, String)
+parse parser = S.runState (runExceptT parser)
 
 skipSpaces :: String -> String
 skipSpaces = dropWhile (== ' ')
+
+and2' :: (a -> b -> c) -> Parser a -> Parser b -> Parser c
+and2' f p1 p2 = do
+  v1 <- p1
+  f v1 <$> p2
+
+and3' :: (a -> b -> c -> d) -> Parser a -> Parser b -> Parser c -> Parser d
+and3' f p1 p2 p3 = do
+  v1 <- p1
+  v2 <- p2
+  f v1 v2 <$> p3
+
+or2' :: Parser a -> Parser a -> Parser a
+or2' a b = do
+  inputBefore <- lift S.get
+  a `catchE` \e1 -> do
+    lift (S.put inputBefore)
+    b `catchE` \e2 -> do
+      lift (S.put inputBefore)
+      throwE (e1 ++ "\n" ++ e2)
+
+or3' :: Parser a -> Parser a -> Parser a -> Parser a
+or3' a b c = do
+  inputBefore <- lift S.get
+  a `catchE` \e1 -> do
+    lift (S.put inputBefore)
+    b `catchE` \e2 -> do
+      lift (S.put inputBefore)
+      c `catchE` \e3 -> do
+        lift (S.put inputBefore)
+        throwE (e1 ++ "\n" ++ e2 ++ "\n" ++ e3)
+
+or5' :: Parser a -> Parser a -> Parser a -> Parser a -> Parser a -> Parser a
+or5' a b c d e = do
+  or3' a b c `catchE` \e1 -> do
+    resultB <- or2' d e
+    return resultB `catchE` \_ -> throwE e1
+
+many :: Parser a -> Parser [a]
+many p =
+  ( do
+      x <- p
+      xs <- many p
+      return (x : xs)
+  )
+    `catchE` \_ -> return []
 
 strip :: String -> String
 strip = lstrip . rstrip
@@ -136,117 +149,160 @@ lstrip s = case s of
 rstrip :: String -> String
 rstrip = reverse . lstrip . reverse
 
+parseChar :: Char -> Parser Char
+parseChar c = do
+  input <- lift S.get
+  case input of
+    [] -> throwE ("Cannot find " ++ [c] ++ " in an empty input")
+    s@(h : t) -> if c == h then lift $ S.put t >> return h else throwE (c : " is not found in " ++ s ++ "\n")
+
 parseLiteral :: String -> Parser String
-parseLiteral [] input = Right ([], input)
-parseLiteral (x:xs) input =
-  let input' = skipSpaces input
-   in if not (null input') && head input' == x
-        then parseLiteral xs (tail input')
-        else Left $ "Expected " ++ (x:xs)
+parseLiteral [] = return []
+parseLiteral (x : xs) = do
+  input <- lift S.get
+  let strippedInput = strip input
+  lift $ S.put strippedInput
+  _ <- parseChar x
+  rest <- parseLiteral xs
+  return (x : rest)
 
 -- <FoodItems> ::= <Fruits> | <Vegetables> | <Grains> | <Dairy> | <Meats>
 parseFoodCategory :: Parser Category
-parseFoodCategory input =
-  case parseLiteral "Fruits" input of
-    Right (_, rest) -> Right (Fruits, rest)
-    Left _ -> case parseLiteral "Vegetables" input of
-      Right (_, rest) -> Right (Vegetables, rest)
-      Left _ -> case parseLiteral "Grains" input of
-        Right (_, rest) -> Right (Grains, rest)
-        Left _ -> case parseLiteral "Dairy" input of
-          Right (_, rest) -> Right (Dairy, rest)
-          Left _ -> case parseLiteral "Meats" input of
-            Right (_, rest) -> Right (Meats, rest)
-            Left _ -> Left "Failed to parse food category"
+parseFoodCategory = 
+  or5' 
+    (parseLiteral "Fruits" >> return Fruits)
+    (parseLiteral "Vegetables" >> return Vegetables)
+    (parseLiteral "Grains" >> return Grains)
+    (parseLiteral "Dairy" >> return Dairy)
+    (parseLiteral "Meats" >> return Meats)
 
 -- <HouseholdSupplies> ::= <CleaningProducts> | <PaperGoods>
 parseHouseholdCategory :: Parser Category
-parseHouseholdCategory input =
-    case parseLiteral "CleaningProducts" input of
-      Right(_, rest) -> Right (CleaningProducts, rest)
-      Left _ -> case parseLiteral "PaperGoods" input of
-        Right (_, rest) -> Right (PaperGoods, rest)
-        Left _ -> Left "Failed to parse household supplies category"
+parseHouseholdCategory = do
+  or2' 
+    (parseLiteral "CleaningProducts" >> return CleaningProducts)
+    (parseLiteral "PaperGoods" >> return PaperGoods)
 
 -- <Fruits> ::= <Apples> | <Bananas> | <Oranges>
 parseFruits :: Parser String
-parseFruits input =
-  let input' = skipSpaces input
-      (name, rest) = span (/= ' ') input'
-    in if name == "Apples" || name == "Bananas" || name == "Oranges"
-       then Right (name, skipSpaces rest)
-       else Left "No such fruit allowed"
+parseFruits = do
+  name <- parseString
+  if name `elem` ["Apples", "Bananas", "Oranges"]
+    then return name
+    else throwE "No such fruit allowed"
 
 -- <Vegetables> ::= <Carrots> | <Potatoes> | <Spinach>
 parseVegetables :: Parser String
-parseVegetables input =
-  let input' = skipSpaces input
-      (name, rest) = span (/= ' ') input'
-    in if name == "Carrots" || name == "Potatoes" || name == "Spinach"
-       then Right (name, skipSpaces rest)
-       else Left "No such vegetable allowed"
+parseVegetables = do
+  name <- parseString
+  if name `elem` ["Carrots", "Potatoes", "Spinach"]
+    then return name
+    else throwE "No such vegetable allowed"
 
 -- <Grains> ::= <Rice> | <Bread> | <Pasta>
 parseGrains :: Parser String
-parseGrains input =
-  let input' = skipSpaces input
-      (name, rest) = span (/= ' ') input'
-    in if name == "Rice" || name == "Bread" || name == "Pasta"
-       then Right (name, skipSpaces rest)
-       else Left "No such grain allowed"
+parseGrains = do
+  name <- parseString
+  if name `elem` ["Rice", "Bread", "Pasta"]
+    then return name
+    else throwE "No such grain allowed"
 
 -- <Dairy> ::= <Milk> | <Cheese> | <Yogurt>
 parseDairy :: Parser String
-parseDairy input =
-  let input' = skipSpaces input
-      (name, rest) = span (/= ' ') input'
-    in if name == "Milk" || name == "Cheese" || name == "Yogurt"
-       then Right (name, skipSpaces rest)
-       else Left "No such dairy allowed"
+parseDairy = do
+  name <- parseString
+  if name `elem` ["Milk", "Cheese", "Yogurt"]
+    then return name
+    else throwE "No such dairy allowed"
 
 -- <Meats> ::= <Chicken> | <Beef> | <Fish>
 parseMeat :: Parser String
-parseMeat input =
-  let input' = skipSpaces input
-      (name, rest) = span (/= ' ') input'
-    in if name == "Chicken" || name == "Beef" || name == "Fish"
-       then Right (name, skipSpaces rest)
-       else Left "No such meat allowed"
+parseMeat = do
+  name <- parseString
+  if name `elem` ["Chicken", "Beef", "Fish"]
+    then return name
+    else throwE "No such meat allowed"
 
 -- <Beverages> ::= <Soda> | <Juice> | <Water>
 parseSpecificBeverage :: Parser String
-parseSpecificBeverage input =
-  let input' = skipSpaces input
-      (name, rest) = span (/= ' ') input'
-    in if name == "Soda" || name == "Juice" || name == "Water"
-       then Right (name, skipSpaces rest)
-       else Left "No such fruit allowed"
+parseSpecificBeverage = do
+  name <- parseString
+  if name `elem` ["Soda", "Juice", "Water"]
+    then return name
+    else throwE "No such beverage allowed"
 
 -- <CleaningProducts> ::= <Detergent> | <Soap>
 parseCleaningProducts :: Parser String
-parseCleaningProducts input =
-  let input' = skipSpaces input
-      (name, rest) = span (/= ' ') input'
-    in if name == "Detergent" || name == "Soap"
-       then Right (name, skipSpaces rest)
-       else Left "No such cleaning product allowed"
+parseCleaningProducts = do
+  name <- parseString
+  if name `elem` ["Detergent", "Soap"]
+    then return name
+    else throwE "No such cleaning product allowed"
 
 -- <PaperGoods> ::= <PaperTowels> | <ToiletPaper>
 parsePaperGoods :: Parser String
-parsePaperGoods input =
-  let input' = skipSpaces input
-      (name, rest) = span (/= ' ') input'
-    in if name == "PaperTowels" || name == "ToiletPaper"
-       then Right (name, skipSpaces rest)
-       else Left "No such paper goods allowed"
+parsePaperGoods = do
+  name <- parseString
+  if name `elem` ["PaperTowels", "ToiletPaper"]
+    then return name
+    else throwE "No such paper goods allowed"
 
 parseBeverage :: Parser Item
-parseBeverage input =
-  and3' (\_ name number -> Beverage name number) (parseLiteral "Beverage") parseSpecificBeverage parseAddInt input
+parseBeverage = do
+  _ <- parseLiteral "Beverage"
+  name <- parseSpecificBeverage
+  qty <- parseAddInt
+  return (Beverage name qty)
 
 parseHousehold :: Parser Item
-parseHousehold input =
-  and3' (\cat name number -> HouseholdSupplies cat name number) parseHouseholdCategory (or2' parseCleaningProducts parsePaperGoods) parseAddInt input
+parseHousehold = do
+  cat <- parseHouseholdCategory
+  name <- or2' parseCleaningProducts parsePaperGoods
+  qty <- parseAddInt
+  return (HouseholdSupplies cat name qty)
+
+
+
+parseString :: Parser String
+parseString = do
+  input <- lift S.get
+  let input' = strip input
+  case input' of
+    ('"' : xs) -> parseQuotedString xs
+    _ -> do
+      let (str, rest) = span (\c -> c /= ' ' && c /= ',' && c /= '(' && c /= ')') input'
+      lift (S.put rest)
+      return str
+  where
+    parseQuotedString [] = throwE "Unexpected end of input in quoted string"
+    parseQuotedString ('"' : rest) = lift (S.put rest) >> return ""
+    parseQuotedString (x : rest) = do
+      str <- parseQuotedString rest
+      return (x : str)
+
+
+parseAddInt :: Parser Int
+parseAddInt = do
+  input <- lift S.get
+  let strippedInput = strip input
+  let baseValue = 0
+  let (digits, rest) = span isDigit strippedInput
+  if null digits
+    then return baseValue
+    else do
+      lift (S.put rest)
+      return (read digits)
+
+parseInt :: Parser Int
+parseInt = do
+  input <- lift S.get
+  let strippedInput = strip input
+  let (digits, rest) = span isDigit strippedInput
+  if null digits
+    then throwE "Expected an integer"
+    else do
+      lift (S.put rest)
+      return (read digits)
 
 -- <Item> ::= <FoodItems> | <Beverages> | <HouseholdSupplies>
 parseItem :: Parser Item
@@ -256,79 +312,26 @@ parseItem =
     parseBeverage
     parseHousehold
 
-parseString :: Parser String
-parseString input =
-  let input' = skipSpaces input
-   in if null input'
-        then Right ("", "")
-        else if head input' == '"'
-             then parseQuotedString (tail input')
-             else let (str, rest) = span (\c -> c /= ' ' && c /= ',' && c /= '(' && c /= ')') input'
-                  in Right (str, rest)
-  where
-    parseQuotedString [] = Left "Unexpected end of input in quoted string"
-    parseQuotedString ('"' : rest) = Right ("", rest)
-    parseQuotedString (x : rest) =
-      case parseQuotedString rest of
-        Right (str, rest') -> Right (x : str, rest')
-        Left err -> Left err
-
-parseAddInt :: Parser Int
-parseAddInt input =
-    let (digits, rest) = span isDigit (skipSpaces input)
-        baseValue = 0
-    in if null digits
-        then Right(baseValue, rest)
-        else Right(read digits, rest)
-
 parseStorage :: Parser Storage
-parseStorage input = 
-      case parseMultipleItems input of
-        Right (items, rest') -> Right (Storage items, rest')
-        Left _-> Left  "Likely case of mistyping"
+parseStorage = do
+  _ <- parseLiteral "Storage"
+  items <- parseMultipleItems
+  return (Storage items)
 
 -- <Storage> ::= <Item> | <Storage> <Item>
 parseMultipleItems :: Parser [Item]
-parseMultipleItems input =
-  case parseItem input of
-    Right (item, rest) ->
-      case parseMultipleItems rest of
-        Right (items, rest') -> Right (item : items, rest')
-        Left _ -> Right ([item], rest)
-    Left _ -> Left "Failed to parse items in storage"
+parseMultipleItems = do
+  items <- many parseItem
+  return items
+  where
+    many p = ((:) <$> p <*> many p) <|> return []
 
-
-parseAddStorage :: Parser Query
-parseAddStorage = and2' (\_ storage -> AddStorage storage) (parseLiteral "add_storage") parseStorage
-
-parseInt :: Parser Int
-parseInt input =
-  let (digits, rest) = span isDigit (skipSpaces input)
-   in if null digits
-        then Left "Expected an integer that is positive"
-        else Right (read digits, rest)
 
 parseView :: Parser Query
-parseView input =
-  case parseLiteral "show_store" (skipSpaces input) of
-    Right (_, rest) -> Right (ShowInventory, rest)
-    Left _ -> Left "Expected 'show_inventory'"
+parseView = do
+ _ <- parseLiteral "show_store"
+ return ShowInventory
 
-searchMatches :: ItemWithId -> String -> Bool
-searchMatches (ItemWithId _ item) search = itemNameMatches item search
-
-itemNameMatches :: Item -> String -> Bool
-itemNameMatches (Food _ name _) search = name == search
-itemNameMatches (Beverage name _) search = name == search
-itemNameMatches (HouseholdSupplies _ name _) search = name == search
-
-restockItem :: ItemWithId -> Int -> ItemWithId
-restockItem (ItemWithId id (Food cat name qty)) quantity =
-    ItemWithId id (Food cat name (qty + quantity))
-restockItem (ItemWithId id (Beverage name qty)) quantity =
-    ItemWithId id (Beverage name (qty + quantity))
-restockItem (ItemWithId id (HouseholdSupplies cat name qty)) quantity =
-    ItemWithId id (HouseholdSupplies cat name (qty + quantity))
 
 parseRestockInventory :: [ItemWithId] -> String -> Int -> [ItemWithId]
 parseRestockInventory [] _ _ = []
@@ -348,6 +351,44 @@ parseSellInventory (x:xs) search number =
       Left err -> Left err
       Right updatedRest -> Right (x : updatedRest)
 
+
+parseRestock :: Parser Query
+parseRestock = 
+  and3' (\_ name number -> RestockItems name number) (parseLiteral "restock") parseString parseInt
+
+
+parseSellItem :: Parser Query
+parseSellItem = 
+  and3' (\_ name number -> SellItem name number) (parseLiteral "sell") parseString parseInt
+
+parseRemove :: Parser Query
+parseRemove  =
+  and2' (\_ itemName -> RemoveItem itemName) (parseLiteral "remove_item") parseString
+
+
+
+parseAddStorage :: Parser Query
+parseAddStorage = and2' (\_ storage -> AddStorage storage) (parseLiteral "add_storage") parseStorage
+
+
+searchMatches :: ItemWithId -> String -> Bool
+searchMatches (ItemWithId _ item) search = itemNameMatches item search
+
+itemNameMatches :: Item -> String -> Bool
+itemNameMatches (Food _ name _) search = name == search
+itemNameMatches (Beverage name _) search = name == search
+itemNameMatches (HouseholdSupplies _ name _) search = name == search
+
+restockItem :: ItemWithId -> Int -> ItemWithId
+restockItem (ItemWithId id (Food cat name qty)) quantity =
+    ItemWithId id (Food cat name (qty + quantity))
+restockItem (ItemWithId id (Beverage name qty)) quantity =
+    ItemWithId id (Beverage name (qty + quantity))
+restockItem (ItemWithId id (HouseholdSupplies cat name qty)) quantity =
+    ItemWithId id (HouseholdSupplies cat name (qty + quantity))
+
+
+
 sellItem :: ItemWithId -> Int -> Either String ItemWithId
 sellItem (ItemWithId id (Food cat name qty)) quantityToSell =
     let newQty = qty - quantityToSell
@@ -366,23 +407,10 @@ sellItem (ItemWithId id (HouseholdSupplies cat name qty)) quantityToSell =
         else Left ("Insufficient stock for item: " ++ name)
 
 
-parseRestock :: Parser Query
-parseRestock input = 
-  and3' (\_ name number -> RestockItems name number) (parseLiteral "restock") parseString parseInt input
+parseQuery :: Parser Query
+parseQuery =
+    or5' parseView parseAddStorage parseSellItem parseRestock parseRemove
 
-
-parseSellItem :: Parser Query
-parseSellItem input = 
-  and3' (\_ name number -> SellItem name number) (parseLiteral "sell") parseString parseInt input
-
-parseRemove :: Parser Query
-parseRemove input =
-  and2' (\_ itemName -> RemoveItem itemName) (parseLiteral "remove_item") parseString input
-parseQuery :: String -> Either String (Query, String)
-parseQuery input =
-  case or5' parseView  parseAddStorage parseSellItem parseRestock parseRemove input of
-    Right (query, rest) -> Right (query, rest)
-    Left _ -> Left "Failed to parse: Unknown command given"
 
 stateTransition :: State -> Query -> Either String (Maybe String, State)
 stateTransition st query = case query of

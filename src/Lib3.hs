@@ -8,9 +8,18 @@ module Lib3
     StorageOp (..),
     storageOpLoop,
     parseCommand,
-    parseStatements,  -- kept for compatibility
+    parseStatements,
     marshallState,
-    renderStatements
+    renderStatements,
+    Command(..),
+    Statements(..),
+    parseLoad,
+    parseSave,
+    parseStatementsCommand,
+    renderQuery,
+    renderItem,
+    applyQueries,
+    getQueries,
     ) where
 
 import Control.Concurrent (Chan, newChan, readChan, writeChan)
@@ -19,6 +28,9 @@ import Control.Concurrent.STM.TVar
 import Data.Maybe (fromMaybe)
 import Lib2 (Query(..), State(..), Storage(..), ItemWithId(..), Item(..), parseQuery, strip, emptyState)
 import qualified Lib2
+
+import System.IO (hFlush, stdout)
+import System.IO.Unsafe (unsafePerformIO)
 
 data StorageOp = Save String (Chan ()) | Load (Chan String)
 
@@ -54,25 +66,22 @@ data Command = StatementCommand Statements |
 
 
 -- | Parses user's input.
-parseCommand :: String -> Either String (Command, String)
+parseCommand ::  Lib2.Parser Command
 parseCommand =
   Lib2.or3'
     parseLoad
     parseSave
     parseStatementsCommand
 
-parseLoad :: String -> Either String (Command, String)
-parseLoad input =
-  let strippedInput = Lib2.strip input
-  in case Lib2.parseLiteral "load" strippedInput of
-       Right (_, rest) -> Right (LoadCommand, rest)
-       Left _ -> Left "Failed to parse 'load'"
+parseLoad :: Lib2.Parser Command
+parseLoad = do
+  _ <- Lib2.parseLiteral "load"
+  return LoadCommand
 
-parseSave :: String -> Either String (Command, String)
-parseSave input =
-  case Lib2.parseLiteral "save" (Lib2.strip input) of
-    Right (_, rest) -> Right (SaveCommand, rest)
-    Left _ -> Left "Failed to parse 'save'"
+parseSave :: Lib2.Parser Command
+parseSave = do
+  _ <- Lib2.parseLiteral "save"
+  return SaveCommand
 
 -- | Parses Statement.
 -- Must be used in parseCommand.
@@ -81,34 +90,14 @@ parseSave input =
 -- | Parses Statements.
 -- Handles both single and batch commands.
 -- | Parses Statements.
-parseStatements :: String -> Either String (Statements, String)
-parseStatements input =
-  let
-    strippedInput = strip input
-  in case parseMultipleQueries strippedInput of
-       Right (queries, rest) -> Right (Batch queries, rest)
-       Left err -> Left err
+parseStatements :: Lib2.Parser Statements
+parseStatements = do
+  queries <- Lib2.many Lib2.parseQuery
+  return (Batch queries)
 
-parseStatementsCommand :: String -> Either String (Command, String)
-parseStatementsCommand input =
-  case parseStatements input of
-    Right (statements, rest) -> Right (StatementCommand statements, rest)
-    Left err -> Left $ "Failed to parse command\n" ++ err
-
-
-parseMultipleQueries :: String -> Either String ([Query], String)
-parseMultipleQueries input =
-  parseQueries input []
-  where
-    parseQueries :: String -> [Query] -> Either String ([Query], String)
-    parseQueries "" acc = Right (reverse acc, "")
-    parseQueries str acc =
-      let strippedStr = strip str
-      in case parseQuery strippedStr of
-           Right (query, rest) -> parseQueries (strip rest) (query : acc)
-           Left err | null acc   -> Left err
-                    | otherwise -> Right (reverse acc, str)
-
+parseStatementsCommand :: Lib2.Parser Command
+parseStatementsCommand = do
+  StatementCommand <$> parseStatements
 
 -- | Converts program's state into Statements
 -- (probably a batch, but might be a single query)
@@ -127,6 +116,11 @@ renderStatements :: [Query] -> String
 renderStatements queries = 
     concat $ map renderQuery queries
 
+--getStringFromComponent :: Lib2.Component -> String
+--getStringFromComponent (Lib2.Storage items) = 
+--getStringFromComponent (Lib2.Storage a b) = "storage(" ++ show a ++ ", " ++ show b ++ ")"
+--getStringFromComponent (Lib2.ProductionUnit a b) = "production_unit(" ++ show a ++ ", " ++ show b ++ ")"
+--getStringFromComponent (Lib2.Subsystem components) = "subsystem(" ++ unwords (map getStringFromComponent components) ++ ")"
 
 -- Helper function to render individual queries
 renderQuery :: Query -> String
@@ -168,10 +162,10 @@ stateTransition st command ioChan = case command of
     replyChan <- newChan
     writeChan ioChan (Load replyChan)
     content <- readChan replyChan
-    case parseStatements content of
-      Left err -> return $ Left err
-      Right (queries, _) -> atomically $ do
-        let (_, newState) = applyQueries Lib2.emptyState (getQueries queries)
+    case Lib2.parse parseStatements content of
+      (Left err, _) -> return $ Left err
+      (Right statements, _) -> atomically $ do
+        let (_, newState) = applyQueries Lib2.emptyState (getQueries statements)
         writeTVar st newState
         return $ Right $ Just "State loaded successfully."
   SaveCommand -> do
@@ -205,8 +199,14 @@ applyQueries st (q : qs) =
       (otherMsg, finalState) = applyQueries newState qs
    in (msg ++ "\n" ++ otherMsg, finalState)
 
+
 applyQuery :: Lib2.State -> Lib2.Query -> (String, Lib2.State)
-applyQuery state query =
-  case Lib2.stateTransition state query of
-    Right (msg, newState) -> (fromMaybe "" msg, newState)
-    Left e -> (e, state)
+applyQuery state query = unsafePerformIO $ do
+    putStrLn $ "applyQuery called with query: " ++ show query
+    case Lib2.stateTransition state query of
+      Right (msg, newState) -> do
+          putStrLn $ "State after query: " ++ show (inventory newState)
+          return (fromMaybe "" msg, newState)
+      Left e -> do
+          putStrLn $ "Error in query: " ++ e
+          return (e, state)
